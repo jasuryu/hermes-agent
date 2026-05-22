@@ -299,6 +299,12 @@ def test_dispatch_spawn_enabled_claims_commits_launches_and_records_success(runt
         assert context["lease"]["attempt_id"] == result.claims[0].attempt_id
         assert context["lease"]["lease_owner"] == "test-daemon"
         assert observed["env"]["HERMES_AGENT_RUNTIME_ENABLE_WORKER_EXECUTION"] == "1"
+        model_auth_path = Path(observed["env"]["HERMES_AGENT_RUNTIME_MODEL_AUTH"])
+        assert model_auth_path.is_file()
+        assert stat.S_IMODE(model_auth_path.lstat().st_mode) == 0o600
+        model_auth = json.loads(model_auth_path.read_text())
+        assert model_auth["version"] == 1
+        assert "api_key" not in model_auth or isinstance(model_auth.get("api_key"), str)
         assert "HERMES_HOME" not in observed["env"]
         job = db.get_job(conn, job_id)
         assert job is not None

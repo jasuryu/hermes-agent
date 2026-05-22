@@ -40,6 +40,8 @@ def _args(**kwargs):
         "spawn": False,
         "enable_spawn": False,
         "isolation_backend": "disabled",
+        "allow_network": False,
+        "worker_timeout_seconds": None,
         "interval": 0.0,
         "max_ticks": 1,
         "write": False,
@@ -455,6 +457,28 @@ def test_runtime_service_unit_defaults_to_recovery_only_no_spawn(capsys, tmp_pat
     assert "--interval 5" in unit
     assert "--spawn" not in unit
     assert "--enable-spawn" not in unit
+
+
+def test_runtime_service_unit_can_be_spawn_enabled_with_network_and_timeout(capsys):
+    rc = runtime_command(_args(
+        runtime_command="service-unit",
+        interval=5.0,
+        lease_owner="runtime-daemon",
+        spawn=True,
+        enable_spawn=True,
+        isolation_backend="bubblewrap",
+        allow_network=True,
+        worker_timeout_seconds=120,
+    ))
+
+    assert rc == 0
+    unit = capsys.readouterr().out
+    assert "Description=Hermes Agent Runtime daemon (spawn-enabled)" in unit
+    assert "--spawn" in unit
+    assert "--enable-spawn" in unit
+    assert '--isolation-backend "bubblewrap"' in unit
+    assert "--allow-network" in unit
+    assert "--worker-timeout-seconds 120" in unit
 
 
 def test_runtime_install_service_dry_run_does_not_write_unit(capsys, tmp_path):

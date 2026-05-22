@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from agent_runtime import db, worker_broker, worker_main
+from agent_runtime.roles import get_role
 
 
 @pytest.fixture
@@ -142,6 +143,17 @@ def test_worker_main_runs_role_specific_agent_when_execution_gate_enabled(runtim
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ATTEMPT_ID", claim.attempt_id)
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_LEASE_OWNER", "exec-worker")
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_CONTEXT", str(bundle.context_path))
+    assert bundle.model_auth_path is not None
+    bundle.model_auth_path.write_text(json.dumps({
+        "version": 1,
+        "available": True,
+        "provider": "openai-codex",
+        "api_mode": "codex_responses",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_key": "test-worker-token",
+    }))
+    bundle.model_auth_path.chmod(0o600)
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_MODEL_AUTH", str(bundle.model_auth_path))
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ENABLE_WORKER_EXECUTION", "1")
 
     assert worker_main.main(["--job", job_id], agent_factory=FakeAgent) == 0
@@ -151,10 +163,16 @@ def test_worker_main_runs_role_specific_agent_when_execution_gate_enabled(runtim
     assert payload["success"] is True
     assert payload["role"] == "code_worker"
     assert payload["summary"] == "completed worker task"
-    assert observed["agent_kwargs"]["model"] == "gpt-5.3-codex"
-    assert observed["agent_kwargs"]["enabled_toolsets"] == ["terminal", "file", "code_execution", "git"]
-    assert observed["agent_kwargs"]["skip_memory"] is True
-    assert observed["agent_kwargs"]["skip_context_files"] is True
+    agent_kwargs = observed["agent_kwargs"]
+    assert isinstance(agent_kwargs, dict)
+    assert agent_kwargs["model"] == "gpt-5.3-codex"
+    assert agent_kwargs["provider"] == "openai-codex"
+    assert agent_kwargs["api_mode"] == "codex_responses"
+    assert agent_kwargs["base_url"] == "https://chatgpt.com/backend-api/codex"
+    assert agent_kwargs["api_key"] == "test-worker-token"
+    assert agent_kwargs["enabled_toolsets"] == ["terminal", "file", "code_execution", "git"]
+    assert agent_kwargs["skip_memory"] is True
+    assert agent_kwargs["skip_context_files"] is True
     assert "Implement feature" in observed["prompt"]
     assert "Change only the bounded repo" in observed["prompt"]
     with db.connect() as conn:
@@ -186,6 +204,45 @@ def test_worker_main_rejects_context_identity_mismatch_without_exposing_context(
     assert "Mismatch hidden run" not in out.out
     assert "Mismatch hidden job" not in out.out
     assert "context identity" in out.err
+
+
+def test_worker_main_reports_agent_failed_result_as_worker_failure(runtime_home, capsys, monkeypatch):
+    class FailingAgent:
+        def __init__(self, **kwargs):
+            pass
+
+        def run_conversation(self, prompt):
+            return {"completed": False, "failed": True, "error": "provider rejected model"}
+
+    with db.connect() as conn:
+        run_id = db.create_run(conn, title="Failing executable run")
+        job_id = db.create_job(conn, run_id=run_id, role="sentinel", title="Failing worker job")
+        claim = db.claim_next_job(conn, lease_owner="exec-worker")
+        assert claim is not None
+        bundle = worker_broker.materialize_worker_context(
+            conn,
+            job_id=job_id,
+            lease_owner="exec-worker",
+            attempt_id=claim.attempt_id,
+            hermes_home=runtime_home,
+        )
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ATTEMPT_ID", claim.attempt_id)
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_LEASE_OWNER", "exec-worker")
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_CONTEXT", str(bundle.context_path))
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ENABLE_WORKER_EXECUTION", "1")
+
+    assert worker_main.main(["--job", job_id], agent_factory=FailingAgent) == 1
+
+    out = capsys.readouterr()
+    payload = json.loads(out.err)
+    assert payload["success"] is False
+    assert payload["role"] == "sentinel"
+    assert "provider rejected model" in payload["error"]
+
+
+def test_sentinel_role_uses_codex_compatible_model_for_live_spawn():
+    assert get_role("sentinel").model.startswith("gpt-")
 
 
 def test_worker_main_runs_ops_worker_with_mandatory_command_guard_toolset(runtime_home, capsys, monkeypatch):

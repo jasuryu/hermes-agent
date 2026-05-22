@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import os
 from pathlib import Path
 import stat
 from typing import Any, Callable
@@ -54,6 +55,42 @@ def _load_context(path: str | Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("worker context must be a JSON object")
     return data
+
+
+def _load_model_auth(path: str | Path) -> dict[str, Any]:
+    auth_path = Path(path)
+    if auth_path.is_symlink() or not auth_path.is_file():
+        raise ValueError("worker model auth must be a regular brokered file")
+    if stat.S_IMODE(auth_path.lstat().st_mode) & 0o077:
+        raise ValueError("worker model auth must not be group/world accessible")
+    with auth_path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    if not isinstance(data, dict):
+        raise ValueError("worker model auth must be a JSON object")
+    return data
+
+
+def _agent_runtime_kwargs_from_model_auth(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    auth = _load_model_auth(path)
+    if auth.get("available") is False:
+        raise RuntimeError(f"worker model auth unavailable: {auth.get('error') or 'unknown provider resolution error'}")
+    kwargs: dict[str, Any] = {}
+    for source, target in (
+        ("provider", "provider"),
+        ("api_mode", "api_mode"),
+        ("base_url", "base_url"),
+        ("api_key", "api_key"),
+        ("command", "acp_command"),
+    ):
+        value = auth.get(source)
+        if isinstance(value, str) and value:
+            kwargs[target] = value
+    args = auth.get("args")
+    if isinstance(args, list) and all(isinstance(item, str) for item in args):
+        kwargs["acp_args"] = list(args)
+    return kwargs
 
 
 def _dict_value(context: dict[str, Any], key: str) -> dict[str, Any]:
@@ -174,6 +211,17 @@ def _summary_from_agent_result(result: Any) -> str:
     return str(result or "")
 
 
+def _failure_error_from_agent_result(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+    failed = result.get("failed") is True or result.get("success") is False
+    completed_false_with_error = result.get("completed") is False and bool(result.get("error"))
+    if not (failed or completed_false_with_error):
+        return ""
+    error = result.get("error") or result.get("final_response") or result.get("summary") or "worker agent returned failed result"
+    return str(error)
+
+
 def run_role_worker(
     *,
     job_id: str,
@@ -195,7 +243,9 @@ def run_role_worker(
         raise ValueError("worker execution cannot use a main-session role")
     factory = agent_factory or _default_agent_factory
     prompt = build_worker_prompt(context, role)
+    runtime_kwargs = _agent_runtime_kwargs_from_model_auth(os.getenv("HERMES_AGENT_RUNTIME_MODEL_AUTH", "") or None)
     agent = factory(
+        **runtime_kwargs,
         model=role.model,
         enabled_toolsets=list(role.toolsets),
         quiet_mode=True,
@@ -216,11 +266,13 @@ def run_role_worker(
     )
     raw = agent.run_conversation(prompt)
     summary = _summary_from_agent_result(raw)
+    error = _failure_error_from_agent_result(raw)
     return WorkerExecutionResult(
-        success=True,
+        success=not bool(error),
         role=role.name,
         model=role.model,
         reasoning_effort=role.reasoning_effort,
         toolsets=role.toolsets,
         summary=summary,
+        error=error,
     )

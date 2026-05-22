@@ -114,6 +114,7 @@ def _spawn_claimed_worker(
     workspace_root: str | None,
     worker_timeout_seconds: int,
     now: int | None,
+    allow_network: bool = False,
 ) -> tuple[bool, str]:
     job = db.get_job(conn, claim.job_id)
     if job is None:
@@ -134,6 +135,7 @@ def _spawn_claimed_worker(
             attempt_id=claim.attempt_id,
             lease_owner=claim.lease_owner,
             context_path=bundle.context_path,
+            model_auth_path=bundle.model_auth_path,
             sandbox=bundle.sandbox,
             enable_execution=True,
         )
@@ -144,6 +146,7 @@ def _spawn_claimed_worker(
             cwd=invocation.cwd,
             sandbox=bundle.sandbox,
             context_path=bundle.context_path,
+            allow_network=allow_network,
             executable_resolver=executable_resolver,
         )
         if not plan.allows_spawn:
@@ -227,6 +230,7 @@ def dispatch_once(
     workspace_root: str | None = None,
     lease_ttl_seconds: int = 900,
     worker_timeout_seconds: int | None = None,
+    allow_network: bool = False,
 ) -> DispatchResult:
     recovered_count, promoted_count = _active_runs_promote(conn, now=now)
 
@@ -280,6 +284,7 @@ def dispatch_once(
             workspace_root=workspace_root,
             worker_timeout_seconds=timeout,
             now=now,
+            allow_network=allow_network,
         )
         if did_spawn:
             spawned += 1

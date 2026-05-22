@@ -57,8 +57,8 @@ def main(argv: list[str] | None = None, *, agent_factory: Callable[..., Any] | N
         _print_json({"success": False, "error": str(exc)}, stderr=True)
         return 1
 
-    _print_json(result.to_dict())
-    return 0
+    _print_json(result.to_dict(), stderr=not result.success)
+    return 0 if result.success else 1
 
 
 if __name__ == "__main__":  # pragma: no cover

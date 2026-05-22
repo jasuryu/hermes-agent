@@ -81,16 +81,50 @@ def _systemd_quote(value: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def runtime_service_unit_text(*, interval: float = 5.0, lease_owner: str = "agent-runtime-daemon") -> str:
+def runtime_service_unit_text(
+    *,
+    interval: float = 5.0,
+    lease_owner: str = "agent-runtime-daemon",
+    spawn: bool = False,
+    enable_spawn: bool = False,
+    isolation_backend: str = "disabled",
+    allow_network: bool = False,
+    worker_timeout_seconds: int | None = None,
+) -> str:
     hermes_home = os.environ.get("HERMES_HOME") or str(Path.home() / ".hermes")
     project_root = Path(__file__).resolve().parents[1]
     python = sys.executable
     interval_text = _format_interval(max(0.0, float(interval)))
     lease = _validate_lease_owner(lease_owner)
+    argv = [
+        f"ExecStart={_systemd_quote(python)}",
+        "-m",
+        "hermes_cli.main",
+        "runtime",
+        "daemon",
+        "--interval",
+        interval_text,
+        "--lease-owner",
+        _systemd_quote(lease),
+    ]
+    description = "Hermes Agent Runtime daemon (recovery-only)"
+    if spawn:
+        argv.append("--spawn")
+        description = "Hermes Agent Runtime daemon (spawn-enabled)"
+    if enable_spawn:
+        argv.append("--enable-spawn")
+    backend = _validate_service_value(isolation_backend or "disabled")
+    if spawn or backend not in {"", "disabled"}:
+        argv.extend(("--isolation-backend", _systemd_quote(backend)))
+    if allow_network:
+        argv.append("--allow-network")
+    if worker_timeout_seconds is not None:
+        timeout = max(1, int(worker_timeout_seconds))
+        argv.extend(("--worker-timeout-seconds", str(timeout)))
     return "\n".join(
         [
             "[Unit]",
-            "Description=Hermes Agent Runtime daemon (recovery-only)",
+            f"Description={description}",
             "After=network-online.target",
             "Wants=network-online.target",
             "",
@@ -98,7 +132,7 @@ def runtime_service_unit_text(*, interval: float = 5.0, lease_owner: str = "agen
             "Type=simple",
             f"WorkingDirectory={_validate_service_value(str(project_root))}",
             f"Environment={_systemd_quote(f'HERMES_HOME={hermes_home}')}",
-            f"ExecStart={_systemd_quote(python)} -m hermes_cli.main runtime daemon --interval {interval_text} --lease-owner {_systemd_quote(lease)}",
+            " ".join(argv),
             "Restart=always",
             "RestartSec=10",
             "",
@@ -135,6 +169,11 @@ def runtime_command(args: argparse.Namespace) -> int:
             unit = runtime_service_unit_text(
                 interval=max(0.0, float(getattr(args, "interval", 5.0) or 0.0)),
                 lease_owner=getattr(args, "lease_owner", "agent-runtime-daemon") or "agent-runtime-daemon",
+                spawn=bool(getattr(args, "spawn", False)),
+                enable_spawn=bool(getattr(args, "enable_spawn", False)),
+                isolation_backend=getattr(args, "isolation_backend", "disabled") or "disabled",
+                allow_network=bool(getattr(args, "allow_network", False)),
+                worker_timeout_seconds=getattr(args, "worker_timeout_seconds", None),
             )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
@@ -147,6 +186,11 @@ def runtime_command(args: argparse.Namespace) -> int:
             unit = runtime_service_unit_text(
                 interval=max(0.0, float(getattr(args, "interval", 5.0) or 0.0)),
                 lease_owner=getattr(args, "lease_owner", "agent-runtime-daemon") or "agent-runtime-daemon",
+                spawn=bool(getattr(args, "spawn", False)),
+                enable_spawn=bool(getattr(args, "enable_spawn", False)),
+                isolation_backend=getattr(args, "isolation_backend", "disabled") or "disabled",
+                allow_network=bool(getattr(args, "allow_network", False)),
+                worker_timeout_seconds=getattr(args, "worker_timeout_seconds", None),
             )
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
@@ -158,14 +202,14 @@ def runtime_command(args: argparse.Namespace) -> int:
             print(f"failed to install Runtime daemon unit: {exc}", file=sys.stderr)
             return 1
         if reload_error:
-            print(f"Installed recovery-only Runtime daemon unit: {unit_path}")
+            print(f"Installed Runtime daemon unit: {unit_path}")
             print(f"daemon-reload failed: {reload_error}", file=sys.stderr)
             return 1
         if write:
-            print(f"Installed recovery-only Runtime daemon unit: {unit_path}")
+            print(f"Installed Runtime daemon unit: {unit_path}")
             print("Not started automatically. Run: systemctl --user enable --now hermes-agent-runtime.service")
         else:
-            print(f"DRY RUN: would write recovery-only Runtime daemon unit to {unit_path}")
+            print(f"DRY RUN: would write Runtime daemon unit to {unit_path}")
             print(unit, end="")
         return 0
 
@@ -482,6 +526,8 @@ def runtime_command(args: argparse.Namespace) -> int:
                 spawn=bool(getattr(args, "spawn", False)),
                 enable_spawn=bool(getattr(args, "enable_spawn", False)),
                 isolation_backend=getattr(args, "isolation_backend", "disabled") or "disabled",
+                allow_network=bool(getattr(args, "allow_network", False)),
+                worker_timeout_seconds=getattr(args, "worker_timeout_seconds", None),
             )
             conn.commit()
             payload = result.to_dict()
@@ -508,6 +554,8 @@ def runtime_command(args: argparse.Namespace) -> int:
                         spawn=bool(getattr(args, "spawn", False)),
                         enable_spawn=bool(getattr(args, "enable_spawn", False)),
                         isolation_backend=getattr(args, "isolation_backend", "disabled") or "disabled",
+                        allow_network=bool(getattr(args, "allow_network", False)),
+                        worker_timeout_seconds=getattr(args, "worker_timeout_seconds", None),
                     )
                     conn.commit()
                     results.append(result.to_dict())
@@ -623,6 +671,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_dispatch.add_argument("--spawn", action="store_true", help="Attempt worker spawn instead of recovery/promotion-only dry tick")
     p_dispatch.add_argument("--enable-spawn", action="store_true", help="Explicit operator gate required with --spawn")
     p_dispatch.add_argument("--isolation-backend", default="disabled", help="Reviewed worker isolation backend, e.g. bubblewrap")
+    p_dispatch.add_argument("--allow-network", action="store_true", help="Allow provider network from the bubblewrap worker sandbox")
+    p_dispatch.add_argument("--worker-timeout-seconds", type=int, default=None, help="Maximum seconds to wait for one spawned worker")
     p_dispatch.add_argument("--json", action="store_true")
 
     p_daemon = sub.add_parser("daemon", help="Run a bounded/unbounded scheduler loop; worker spawn requires explicit gated flags")
@@ -632,15 +682,27 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_daemon.add_argument("--spawn", action="store_true", help="Attempt worker spawn instead of recovery/promotion-only ticks")
     p_daemon.add_argument("--enable-spawn", action="store_true", help="Explicit operator gate required with --spawn")
     p_daemon.add_argument("--isolation-backend", default="disabled", help="Reviewed worker isolation backend, e.g. bubblewrap")
+    p_daemon.add_argument("--allow-network", action="store_true", help="Allow provider network from the bubblewrap worker sandbox")
+    p_daemon.add_argument("--worker-timeout-seconds", type=int, default=None, help="Maximum seconds to wait for one spawned worker")
     p_daemon.add_argument("--json", action="store_true")
 
-    p_unit = sub.add_parser("service-unit", help="Print a recovery-only user systemd unit for the runtime daemon")
+    p_unit = sub.add_parser("service-unit", help="Print a user systemd unit for the runtime daemon")
     p_unit.add_argument("--lease-owner", default="agent-runtime-daemon")
     p_unit.add_argument("--interval", type=float, default=5.0)
+    p_unit.add_argument("--spawn", action="store_true", help="Enable worker spawn in the generated unit")
+    p_unit.add_argument("--enable-spawn", action="store_true", help="Explicit operator gate required with --spawn")
+    p_unit.add_argument("--isolation-backend", default="disabled", help="Reviewed worker isolation backend, e.g. bubblewrap")
+    p_unit.add_argument("--allow-network", action="store_true", help="Allow provider network from the bubblewrap worker sandbox")
+    p_unit.add_argument("--worker-timeout-seconds", type=int, default=None)
 
-    p_install = sub.add_parser("install-service", help="Install a recovery-only user systemd unit for the runtime daemon")
+    p_install = sub.add_parser("install-service", help="Install a user systemd unit for the runtime daemon")
     p_install.add_argument("--lease-owner", default="agent-runtime-daemon")
     p_install.add_argument("--interval", type=float, default=5.0)
+    p_install.add_argument("--spawn", action="store_true", help="Enable worker spawn in the installed unit")
+    p_install.add_argument("--enable-spawn", action="store_true", help="Explicit operator gate required with --spawn")
+    p_install.add_argument("--isolation-backend", default="disabled", help="Reviewed worker isolation backend, e.g. bubblewrap")
+    p_install.add_argument("--allow-network", action="store_true", help="Allow provider network from the bubblewrap worker sandbox")
+    p_install.add_argument("--worker-timeout-seconds", type=int, default=None)
     p_install.add_argument("--write", action="store_true", help="Actually write the unit file; omitted means dry-run")
     p_install.add_argument("--reload", action="store_true", help="Run systemctl --user daemon-reload after writing")
 

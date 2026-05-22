@@ -39,6 +39,7 @@ class WorkerLaunchPlan:
     env: dict[str, str]
     cwd: Path
     allows_spawn: bool = False
+    network_allowed: bool = False
     reason: str = ""
 
     def to_dict(self) -> dict[str, object]:
@@ -60,6 +61,7 @@ _ALLOWED_RUNTIME_ENV = {
     "HERMES_AGENT_RUNTIME_ATTEMPT_ID",
     "HERMES_AGENT_RUNTIME_LEASE_OWNER",
     "HERMES_AGENT_RUNTIME_CONTEXT",
+    "HERMES_AGENT_RUNTIME_MODEL_AUTH",
     "HERMES_AGENT_RUNTIME_ENABLE_WORKER_EXECUTION",
     "HERMES_AGENT_RUNTIME_TRACE",
 }
@@ -176,6 +178,16 @@ def _validate_launch_env(worker_env: dict[str, str], *, sandbox: WorkerSandbox, 
     _expect_env_path(worker_env, "XDG_CONFIG_HOME", sandbox.xdg_config_home)
     _expect_env_path(worker_env, "XDG_CACHE_HOME", sandbox.xdg_cache_home)
     _expect_env_path(worker_env, "HERMES_AGENT_RUNTIME_CONTEXT", context_path)
+    if worker_env.get("HERMES_AGENT_RUNTIME_MODEL_AUTH"):
+        auth_path = Path(worker_env["HERMES_AGENT_RUNTIME_MODEL_AUTH"])
+        try:
+            auth_path.resolve().relative_to(sandbox.root.resolve())
+        except ValueError as exc:
+            raise ValueError("worker launch model auth path must live inside sandbox root") from exc
+        if auth_path.is_symlink() or not auth_path.is_file():
+            raise ValueError("worker launch model auth path must be a regular file")
+        if auth_path.stat().st_mode & 0o077:
+            raise ValueError("worker launch model auth path must not be group/world accessible")
     for key in ("HERMES_AGENT_RUNTIME_ATTEMPT_ID", "HERMES_AGENT_RUNTIME_LEASE_OWNER"):
         if not worker_env.get(key):
             raise ValueError(f"worker launch env {key} is required")
@@ -191,6 +203,15 @@ def _setenv_args(worker_env: dict[str, str]) -> tuple[str, ...]:
 def _system_ro_bind_args() -> tuple[str, ...]:
     args: list[str] = []
     for raw in ("/usr", "/bin", "/lib", "/lib64"):
+        path = Path(raw)
+        if path.exists():
+            args.extend(("--ro-bind", raw, raw))
+    return tuple(args)
+
+
+def _network_ro_bind_args() -> tuple[str, ...]:
+    args: list[str] = []
+    for raw in ("/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf", "/etc/ssl/certs"):
         path = Path(raw)
         if path.exists():
             args.extend(("--ro-bind", raw, raw))
@@ -231,7 +252,15 @@ def _python_runtime_ro_bind_args(worker_argv: tuple[str, ...]) -> tuple[str, ...
             roots.append(raw_target.parents[2])
     real_executable = executable.resolve()
     if real_executable.exists():
-        roots.append(real_executable.parent.parent)
+        install_root = real_executable.parent.parent
+        if install_root.parent.name == "python":
+            # uv keeps version aliases beside the resolved interpreter install,
+            # e.g. cpython-3.11-linux-x86_64-gnu -> cpython-3.11.15-...
+            # A venv's python3 may be a relative symlink to a python symlink
+            # targeting that alias, so binding only the resolved install still
+            # leaves the intermediate absolute alias missing at exec time.
+            roots.append(install_root.parent)
+        roots.append(install_root)
     if executable.parent.name == "bin":
         roots.append(executable.parent.parent)
 
@@ -264,8 +293,12 @@ def _bubblewrap_argv(
     sandbox: WorkerSandbox,
     cwd: Path,
     context_path: Path,
+    allow_network: bool = False,
 ) -> tuple[str, ...]:
     context = str(context_path)
+    network_args = () if allow_network else ("--unshare-net",)
+    model_auth = worker_env.get("HERMES_AGENT_RUNTIME_MODEL_AUTH") or ""
+    model_auth_bind_args = ("--ro-bind", model_auth, model_auth) if model_auth else ()
     return (
         executable,
         "--die-with-parent",
@@ -273,11 +306,12 @@ def _bubblewrap_argv(
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
-        "--unshare-net",
+        *network_args,
         "--clearenv",
         "--dev",
         "/dev",
         *_system_ro_bind_args(),
+        *(_network_ro_bind_args() if allow_network else ()),
         *_python_runtime_ro_bind_args(worker_argv),
         "--tmpfs",
         "/tmp",
@@ -285,6 +319,7 @@ def _bubblewrap_argv(
         "--ro-bind",
         context,
         context,
+        *model_auth_bind_args,
         *_setenv_args(worker_env),
         "--chdir",
         str(cwd),
@@ -301,6 +336,7 @@ def build_launch_plan(
     cwd: str | Path,
     sandbox: WorkerSandbox,
     context_path: str | Path,
+    allow_network: bool = False,
     executable_resolver: Callable[[str], str | None] | None = None,
 ) -> WorkerLaunchPlan:
     """Build a reviewed backend-specific worker launch plan."""
@@ -323,6 +359,7 @@ def build_launch_plan(
         sandbox=sandbox,
         cwd=launch_cwd,
         context_path=context,
+        allow_network=allow_network,
     )
     return WorkerLaunchPlan(
         backend="bubblewrap",
@@ -332,5 +369,10 @@ def build_launch_plan(
         env=launch_env,
         cwd=launch_cwd,
         allows_spawn=True,
-        reason="reviewed bubblewrap launch policy is constructed and spawn may proceed behind scheduler enable_spawn gate",
+        network_allowed=bool(allow_network),
+        reason=(
+            "reviewed bubblewrap launch policy is constructed with provider network enabled and spawn may proceed behind scheduler enable_spawn gate"
+            if allow_network else
+            "reviewed bubblewrap launch policy is constructed with network namespace isolation and spawn may proceed behind scheduler enable_spawn gate"
+        ),
     )

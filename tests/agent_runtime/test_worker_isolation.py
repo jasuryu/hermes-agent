@@ -116,7 +116,46 @@ def test_bubblewrap_launch_plan_wraps_worker_and_enforces_workdir(tmp_path):
     assert context_ro_index > sandbox_dir_index
     assert str(hermes_home) not in plan.argv
     assert plan.allows_spawn is True
+    assert plan.network_allowed is False
     assert "reviewed bubblewrap launch policy" in plan.reason
+
+
+def test_bubblewrap_launch_plan_can_explicitly_allow_provider_network(tmp_path):
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    sandbox = worker_broker.create_worker_sandbox(
+        workspace_root=tmp_path / "workers",
+        job_id="job_network",
+        attempt_id="att_network",
+        hermes_home=hermes_home,
+    )
+    context_path = _private_file(sandbox.root / "context.json")
+    worker_env = {
+        "HOME": str(sandbox.home),
+        "TMPDIR": str(sandbox.tmp),
+        "XDG_CONFIG_HOME": str(sandbox.xdg_config_home),
+        "XDG_CACHE_HOME": str(sandbox.xdg_cache_home),
+        "HERMES_AGENT_RUNTIME_CONTEXT": str(context_path),
+        "HERMES_AGENT_RUNTIME_ATTEMPT_ID": "att_network",
+        "HERMES_AGENT_RUNTIME_LEASE_OWNER": "daemon",
+    }
+
+    plan = worker_isolation.build_launch_plan(
+        backend="bubblewrap",
+        worker_argv=["/usr/bin/python3", "-m", "agent_runtime.worker_main", "--job", "job_network"],
+        worker_env=worker_env,
+        cwd=sandbox.workdir,
+        sandbox=sandbox,
+        context_path=context_path,
+        allow_network=True,
+        executable_resolver=lambda name: f"/usr/bin/{name}",
+    )
+
+    assert "--unshare-net" not in plan.argv
+    if Path("/etc/resolv.conf").exists():
+        assert "/etc/resolv.conf" in plan.argv
+    assert plan.network_allowed is True
+    assert "provider network enabled" in plan.reason
 
 
 def test_launch_plan_rejects_cwd_outside_sandbox(tmp_path):
@@ -181,6 +220,26 @@ def test_launch_plan_rejects_env_paths_outside_sandbox(tmp_path):
                 context_path=context_path,
                 executable_resolver=lambda name: f"/usr/bin/{name}",
             )
+
+def test_python_runtime_ro_bind_includes_parent_for_relative_venv_symlink_chain(tmp_path):
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    py_root = tmp_path / "uv" / "python"
+    final_install = py_root / "cpython-3.11.15-linux-x86_64-gnu"
+    final_bin = final_install / "bin"
+    final_bin.mkdir(parents=True)
+    final_python = final_bin / "python3.11"
+    final_python.write_text("#!/bin/sh\n")
+    alias_install = py_root / "cpython-3.11-linux-x86_64-gnu"
+    alias_install.symlink_to(final_install)
+    (venv_bin / "python").symlink_to(alias_install / "bin" / "python3.11")
+    python3 = venv_bin / "python3"
+    python3.symlink_to("python")
+
+    args = worker_isolation._python_runtime_ro_bind_args((str(python3), "-c", "print('ok')"))
+
+    assert ("--ro-bind", str(py_root), str(py_root)) == tuple(args[:3])
+
 
 def test_bubblewrap_launch_plan_runs_current_python_when_bwrap_installed(tmp_path):
     bwrap = shutil.which("bwrap")

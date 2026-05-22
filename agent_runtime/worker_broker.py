@@ -44,10 +44,12 @@ class WorkerContextBundle:
     context_path: Path
     sandbox: WorkerSandbox
     context: dict[str, Any]
+    model_auth_path: Path | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "context_path": str(self.context_path),
+            "model_auth_path": str(self.model_auth_path) if self.model_auth_path else "",
             "sandbox": self.sandbox.to_dict(),
             "context": self.context,
         }
@@ -288,6 +290,44 @@ def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
     os.chmod(path, 0o600)
 
 
+def _runtime_model_auth_snapshot(*, target_model: str = "") -> dict[str, Any]:
+    """Resolve minimal model credentials for a worker-owned LLM session.
+
+    The writable runtime DB and the user's full HERMES_HOME are never exposed to
+    the child process. The trusted parent resolves the active provider and writes
+    only the fields AIAgent needs into a private sandbox file.
+    """
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    try:
+        runtime = resolve_runtime_provider(target_model=target_model or None)
+    except Exception as exc:
+        return {"version": 1, "available": False, "error": str(exc)}
+    snapshot: dict[str, Any] = {"version": 1, "available": True}
+    for key in (
+        "provider",
+        "api_mode",
+        "base_url",
+        "api_key",
+        "source",
+        "requested_provider",
+        "last_refresh",
+        "expires_at",
+        "expires_at_ms",
+        "model",
+    ):
+        value = runtime.get(key)
+        if isinstance(value, (str, int, float)) or value is None:
+            snapshot[key] = value
+    command = runtime.get("command")
+    if isinstance(command, str):
+        snapshot["command"] = command
+    args = runtime.get("args")
+    if isinstance(args, list) and all(isinstance(item, str) for item in args):
+        snapshot["args"] = list(args)
+    return snapshot
+
+
 def materialize_worker_context(
     conn: sqlite3.Connection,
     *,
@@ -315,8 +355,17 @@ def materialize_worker_context(
         hermes_home=hermes_home,
     )
     context_path = sandbox.root / "context.json"
+    model_auth_path = sandbox.root / "model_auth.json"
     _write_private_json(context_path, context)
-    return WorkerContextBundle(context_path=context_path, sandbox=sandbox, context=context)
+    target_model = ""
+    try:
+        from .roles import get_role
+
+        target_model = get_role(str(context.get("job", {}).get("role") or "")).model
+    except Exception:
+        target_model = ""
+    _write_private_json(model_auth_path, _runtime_model_auth_snapshot(target_model=target_model))
+    return WorkerContextBundle(context_path=context_path, sandbox=sandbox, context=context, model_auth_path=model_auth_path)
 
 
 def _decode_output(value: Any) -> str:

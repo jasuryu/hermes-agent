@@ -29,12 +29,14 @@ class WorkerInvocation:
     env: dict[str, str]
     cwd: Path
     context_path: Path
+    model_auth_path: Path | None = None
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["argv"] = list(self.argv)
         data["cwd"] = str(self.cwd)
         data["context_path"] = str(self.context_path)
+        data["model_auth_path"] = str(self.model_auth_path) if self.model_auth_path else ""
         return data
 
 
@@ -92,7 +94,18 @@ def _is_private_dir(path: Path) -> bool:
     return stat.S_ISDIR(st.st_mode) and not (stat.S_IMODE(st.st_mode) & 0o077)
 
 
-def _validate_sandbox(sandbox: WorkerSandbox, context: Path) -> None:
+def _validate_private_sandbox_file(path: Path, *, sandbox: WorkerSandbox, label: str) -> None:
+    try:
+        path.resolve().relative_to(sandbox.root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"{label} must live inside the worker sandbox") from exc
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{label} must be a regular file inside the worker sandbox")
+    if stat.S_IMODE(path.lstat().st_mode) & 0o077:
+        raise ValueError(f"{label} must not be group/world accessible")
+
+
+def _validate_sandbox(sandbox: WorkerSandbox, context: Path, model_auth: Path | None = None) -> None:
     root = sandbox.root.resolve()
     if not _is_private_dir(sandbox.root):
         raise ValueError("worker sandbox root must be a private real directory")
@@ -109,14 +122,9 @@ def _validate_sandbox(sandbox: WorkerSandbox, context: Path) -> None:
             raise ValueError(f"worker sandbox {label} must live inside sandbox root") from exc
         if not _is_private_dir(path):
             raise ValueError(f"worker sandbox {label} must be a private real directory")
-    try:
-        context.resolve().relative_to(root)
-    except ValueError as exc:
-        raise ValueError("context_path must live inside the worker sandbox") from exc
-    if context.is_symlink() or not context.is_file():
-        raise ValueError("context_path must be a regular file inside the worker sandbox")
-    if stat.S_IMODE(context.lstat().st_mode) & 0o077:
-        raise ValueError("context_path must not be group/world accessible")
+    _validate_private_sandbox_file(context, sandbox=sandbox, label="context_path")
+    if model_auth is not None:
+        _validate_private_sandbox_file(model_auth, sandbox=sandbox, label="model_auth_path")
 
 
 def build_worker_invocation(
@@ -127,6 +135,7 @@ def build_worker_invocation(
     attempt_id: str = "",
     lease_owner: str = "",
     context_path: str | Path | None = None,
+    model_auth_path: str | Path | None = None,
     sandbox: WorkerSandbox | None = None,
     extra_env: Mapping[str, str] | None = None,
     enable_execution: bool = False,
@@ -138,7 +147,8 @@ def build_worker_invocation(
     if sandbox is None:
         raise ValueError("worker invocation requires sandbox from trusted broker")
     context = Path(context_path)
-    _validate_sandbox(sandbox, context)
+    model_auth = Path(model_auth_path) if model_auth_path else None
+    _validate_sandbox(sandbox, context, model_auth)
 
     env = _base_worker_env()
     if extra_env:
@@ -153,6 +163,8 @@ def build_worker_invocation(
     env["HERMES_AGENT_RUNTIME_ATTEMPT_ID"] = attempt_id
     env["HERMES_AGENT_RUNTIME_LEASE_OWNER"] = lease_owner
     env["HERMES_AGENT_RUNTIME_CONTEXT"] = str(context)
+    if model_auth is not None:
+        env["HERMES_AGENT_RUNTIME_MODEL_AUTH"] = str(model_auth)
     env["HOME"] = str(sandbox.home)
     env["TMPDIR"] = str(sandbox.tmp)
     env["XDG_CONFIG_HOME"] = str(sandbox.xdg_config_home)
@@ -162,4 +174,4 @@ def build_worker_invocation(
         env["HERMES_AGENT_RUNTIME_ENABLE_WORKER_EXECUTION"] = "1"
 
     argv = (python_executable(), "-c", _worker_bootstrap(job_id))
-    return WorkerInvocation(argv=argv, env=env, cwd=sandbox.workdir, context_path=context)
+    return WorkerInvocation(argv=argv, env=env, cwd=sandbox.workdir, context_path=context, model_auth_path=model_auth)

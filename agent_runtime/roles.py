@@ -69,7 +69,7 @@ DEFAULT_ROLES: dict[str, RuntimeRole] = {
     ),
     "sentinel": RuntimeRole(
         name="sentinel",
-        model="o4-mini",
+        model="gpt-5.4-mini",
         reasoning_effort="low",
         description="Permissive read-only verifier; records findings and never owns workflow.",
         toolsets=("file_readonly", "git_readonly", "artifact_readonly", "safe_web"),
