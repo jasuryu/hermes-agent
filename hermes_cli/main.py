@@ -6070,6 +6070,13 @@ def cmd_kanban(args):
     return kanban_command(args)
 
 
+def cmd_runtime(args):
+    """Agent Runtime control plane."""
+    from hermes_cli.runtime import runtime_command
+
+    sys.exit(runtime_command(args))
+
+
 def cmd_hooks(args):
     """Shell-hook inspection and management."""
     from hermes_cli.hooks import hooks_command
@@ -11795,6 +11802,14 @@ def main():
 
     kanban_parser = _build_kanban_parser(subparsers)
     kanban_parser.set_defaults(func=cmd_kanban)
+
+    # =========================================================================
+    # runtime command — Agent Runtime machine execution truth
+    # =========================================================================
+    from hermes_cli.runtime import build_parser as _build_runtime_parser
+
+    runtime_parser = _build_runtime_parser(subparsers)
+    runtime_parser.set_defaults(func=cmd_runtime)
 
     # =========================================================================
     # hooks command — shell-hook inspection and management

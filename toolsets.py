@@ -258,6 +258,26 @@ TOOLSETS = {
         "includes": [],
     },
 
+    "agent_runtime": {
+        "description": (
+            "Agent Runtime control plane — create/read durable runs and jobs, "
+            "record Orchestrator decisions, and persist permissive Sentinel "
+            "findings. This is machine execution truth; Kanban is optional UI."
+        ),
+        "tools": [
+            "runtime_create_run", "runtime_create_job", "runtime_get_status",
+            "runtime_record_decision", "runtime_add_finding",
+            "runtime_check_command",
+        ],
+        "includes": [],
+    },
+
+    "ops_terminal": {
+        "description": "Agent Runtime Ops Worker terminal guarded by command policy and exact approval packets",
+        "tools": ["runtime_ops_terminal"],
+        "includes": [],
+    },
+
     "discord": {
         "description": "Discord read and participate tools (fetch messages, search members, create threads)",
         "tools": ["discord"],
