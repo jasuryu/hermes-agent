@@ -500,6 +500,8 @@ def runtime_command(args: argparse.Namespace) -> int:
                 title=getattr(args, "title", "") or "Untitled runtime job",
                 body=getattr(args, "body", "") or "",
                 depends_on=getattr(args, "depends_on", []) or [],
+                workspace_kind=getattr(args, "workspace_kind", "scratch") or "scratch",
+                workspace_path=getattr(args, "workspace_path", "") or "",
             )
             job = db.get_job(conn, job_id)
             payload = _job_to_dict(job)
@@ -616,6 +618,8 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_job.add_argument("--role", default="explorer")
     p_job.add_argument("--body", default="")
     p_job.add_argument("--depends-on", action="append", default=[])
+    p_job.add_argument("--workspace-kind", default="scratch", choices=["scratch", "repo", "worktree", "dir"])
+    p_job.add_argument("--workspace-path", default="")
     p_job.add_argument("--json", action="store_true")
 
     p_events = sub.add_parser("events", help="List runtime events")

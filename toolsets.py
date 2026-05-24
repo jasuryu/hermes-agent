@@ -267,7 +267,7 @@ TOOLSETS = {
         "tools": [
             "runtime_create_run", "runtime_create_job", "runtime_get_status",
             "runtime_record_decision", "runtime_add_finding",
-            "runtime_check_command",
+            "runtime_check_command", "runtime_route_task",
         ],
         "includes": [],
     },

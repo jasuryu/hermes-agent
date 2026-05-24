@@ -120,6 +120,92 @@ def test_bubblewrap_launch_plan_wraps_worker_and_enforces_workdir(tmp_path):
     assert "reviewed bubblewrap launch policy" in plan.reason
 
 
+def test_bubblewrap_launch_plan_can_bind_job_workspace_as_workdir(tmp_path):
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("repo workspace\n", encoding="utf-8")
+    sandbox = worker_broker.create_worker_sandbox(
+        workspace_root=tmp_path / "workers",
+        job_id="job_workspace",
+        attempt_id="att_workspace",
+        hermes_home=hermes_home,
+    )
+    context_path = _private_file(sandbox.root / "context.json")
+    worker_env = {
+        "HOME": str(sandbox.home),
+        "TMPDIR": str(sandbox.tmp),
+        "XDG_CONFIG_HOME": str(sandbox.xdg_config_home),
+        "XDG_CACHE_HOME": str(sandbox.xdg_cache_home),
+        "HERMES_AGENT_RUNTIME_CONTEXT": str(context_path),
+        "HERMES_AGENT_RUNTIME_ATTEMPT_ID": "att_workspace",
+        "HERMES_AGENT_RUNTIME_LEASE_OWNER": "daemon",
+    }
+
+    plan = worker_isolation.build_launch_plan(
+        backend="bubblewrap",
+        worker_argv=["/usr/bin/python3", "-c", "print('ok')"],
+        worker_env=worker_env,
+        cwd=sandbox.workdir,
+        sandbox=sandbox,
+        context_path=context_path,
+        workspace_bind_path=repo,
+        workspace_writable=True,
+        executable_resolver=lambda name: f"/usr/bin/{name}",
+    )
+
+    bind_index = next(
+        i for i, token in enumerate(plan.argv[:-2])
+        if token == "--bind" and plan.argv[i + 1] == str(repo)
+    )
+    assert plan.argv[bind_index + 2] == str(sandbox.workdir)
+    assert plan.workspace_bind_path == repo
+    assert plan.workspace_writable is True
+
+
+def test_bubblewrap_launch_plan_binds_readonly_workspace_by_default(tmp_path):
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    docs = tmp_path / "obsidian"
+    docs.mkdir()
+    sandbox = worker_broker.create_worker_sandbox(
+        workspace_root=tmp_path / "workers",
+        job_id="job_workspace_ro",
+        attempt_id="att_workspace_ro",
+        hermes_home=hermes_home,
+    )
+    context_path = _private_file(sandbox.root / "context.json")
+    worker_env = {
+        "HOME": str(sandbox.home),
+        "TMPDIR": str(sandbox.tmp),
+        "XDG_CONFIG_HOME": str(sandbox.xdg_config_home),
+        "XDG_CACHE_HOME": str(sandbox.xdg_cache_home),
+        "HERMES_AGENT_RUNTIME_CONTEXT": str(context_path),
+        "HERMES_AGENT_RUNTIME_ATTEMPT_ID": "att_workspace_ro",
+        "HERMES_AGENT_RUNTIME_LEASE_OWNER": "daemon",
+    }
+
+    plan = worker_isolation.build_launch_plan(
+        backend="bubblewrap",
+        worker_argv=["/usr/bin/python3", "-c", "print('ok')"],
+        worker_env=worker_env,
+        cwd=sandbox.workdir,
+        sandbox=sandbox,
+        context_path=context_path,
+        workspace_bind_path=docs,
+        executable_resolver=lambda name: f"/usr/bin/{name}",
+    )
+
+    bind_index = next(
+        i for i, token in enumerate(plan.argv[:-2])
+        if token == "--ro-bind" and plan.argv[i + 1] == str(docs)
+    )
+    assert plan.argv[bind_index + 2] == str(sandbox.workdir)
+    assert plan.workspace_bind_path == docs
+    assert plan.workspace_writable is False
+
+
 def test_bubblewrap_launch_plan_can_explicitly_allow_provider_network(tmp_path):
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()

@@ -38,6 +38,8 @@ class WorkerLaunchPlan:
     worker_argv: tuple[str, ...]
     env: dict[str, str]
     cwd: Path
+    workspace_bind_path: Path | None = None
+    workspace_writable: bool = False
     allows_spawn: bool = False
     network_allowed: bool = False
     reason: str = ""
@@ -47,6 +49,7 @@ class WorkerLaunchPlan:
         data["argv"] = list(self.argv)
         data["worker_argv"] = list(self.worker_argv)
         data["cwd"] = str(self.cwd)
+        data["workspace_bind_path"] = str(self.workspace_bind_path) if self.workspace_bind_path else ""
         return data
 
 
@@ -285,6 +288,27 @@ def _scratch_bind_args(sandbox: WorkerSandbox) -> tuple[str, ...]:
     return tuple(args)
 
 
+def _validate_workspace_bind_path(path: str | Path | None) -> Path | None:
+    if path is None or str(path).strip() == "":
+        return None
+    candidate = Path(path).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("worker workspace_bind_path must be absolute")
+    if candidate.is_symlink() or not candidate.is_dir():
+        raise ValueError("worker workspace_bind_path must be a real directory")
+    resolved = candidate.resolve()
+    if resolved == Path("/").resolve():
+        raise ValueError("worker workspace_bind_path cannot be filesystem root")
+    return resolved
+
+
+def _workspace_bind_args(*, workspace_bind_path: Path | None, sandbox: WorkerSandbox, writable: bool) -> tuple[str, ...]:
+    if workspace_bind_path is None:
+        return ()
+    operation = "--bind" if writable else "--ro-bind"
+    return (operation, str(workspace_bind_path), str(sandbox.workdir))
+
+
 def _bubblewrap_argv(
     *,
     executable: str,
@@ -293,6 +317,8 @@ def _bubblewrap_argv(
     sandbox: WorkerSandbox,
     cwd: Path,
     context_path: Path,
+    workspace_bind_path: Path | None = None,
+    workspace_writable: bool = False,
     allow_network: bool = False,
 ) -> tuple[str, ...]:
     context = str(context_path)
@@ -316,6 +342,11 @@ def _bubblewrap_argv(
         "--tmpfs",
         "/tmp",
         *_scratch_bind_args(sandbox),
+        *_workspace_bind_args(
+            workspace_bind_path=workspace_bind_path,
+            sandbox=sandbox,
+            writable=workspace_writable,
+        ),
         "--ro-bind",
         context,
         context,
@@ -336,6 +367,8 @@ def build_launch_plan(
     cwd: str | Path,
     sandbox: WorkerSandbox,
     context_path: str | Path,
+    workspace_bind_path: str | Path | None = None,
+    workspace_writable: bool = False,
     allow_network: bool = False,
     executable_resolver: Callable[[str], str | None] | None = None,
 ) -> WorkerLaunchPlan:
@@ -349,6 +382,7 @@ def build_launch_plan(
     context = Path(context_path)
     launch_cwd = Path(cwd)
     _validate_launch_paths(sandbox=sandbox, context_path=context, cwd=launch_cwd)
+    workspace = _validate_workspace_bind_path(workspace_bind_path)
     worker_tuple = tuple(str(part) for part in worker_argv)
     launch_env = {str(k): str(v) for k, v in worker_env.items()}
     _validate_launch_env(launch_env, sandbox=sandbox, context_path=context)
@@ -359,6 +393,8 @@ def build_launch_plan(
         sandbox=sandbox,
         cwd=launch_cwd,
         context_path=context,
+        workspace_bind_path=workspace,
+        workspace_writable=bool(workspace_writable and workspace is not None),
         allow_network=allow_network,
     )
     return WorkerLaunchPlan(
@@ -368,6 +404,8 @@ def build_launch_plan(
         worker_argv=worker_tuple,
         env=launch_env,
         cwd=launch_cwd,
+        workspace_bind_path=workspace,
+        workspace_writable=bool(workspace_writable and workspace is not None),
         allows_spawn=True,
         network_allowed=bool(allow_network),
         reason=(

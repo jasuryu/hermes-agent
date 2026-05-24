@@ -51,6 +51,8 @@ def runtime_create_job(
     title: str,
     body: str = "",
     depends_on: list[str] | None = None,
+    workspace_kind: str = "scratch",
+    workspace_path: str = "",
 ) -> str:
     try:
         db.init_db()
@@ -62,6 +64,8 @@ def runtime_create_job(
                 title=title or "Untitled runtime job",
                 body=body or "",
                 depends_on=depends_on or [],
+                workspace_kind=workspace_kind or "scratch",
+                workspace_path=workspace_path or "",
             )
             job = db.get_job(conn, job_id)
             return _json({"success": True, **job.to_dict()})
@@ -145,6 +149,54 @@ def runtime_check_command(command: str) -> str:
     return _json({"success": True, **verdict.to_dict()})
 
 
+def runtime_route_task(
+    level: str,
+    title: str,
+    objective: str,
+    owner_source: str = "",
+    orchestrator_session_id: str = "",
+    public_ref: str = "auto-router",
+) -> str:
+    """Create a smart-router Runtime graph after the main agent chooses L2/L3."""
+    try:
+        from gateway.subagent_router import create_runtime_route, _source_allowed
+
+        try:
+            from hermes_cli.config import load_config
+
+            cfg = (load_config().get("subagent_router") or {})
+        except Exception:
+            cfg = {}
+        allowed_sources = cfg.get("allowed_sources") if isinstance(cfg, dict) else None
+        if allowed_sources:
+            parts = str(owner_source or "").split(":", 2)
+            platform_key = parts[0] if len(parts) >= 1 else ""
+            chat_id = parts[1] if len(parts) >= 2 else ""
+            thread_id = parts[2] if len(parts) >= 3 else ""
+            if not _source_allowed(cfg, platform_key=platform_key, chat_id=chat_id, thread_id=thread_id):
+                return _err("runtime_route_task owner_source is not allowed by subagent_router.allowed_sources")
+
+        result = create_runtime_route(
+            level=level,
+            title=title,
+            objective=objective,
+            owner_source=owner_source,
+            orchestrator_session_id=orchestrator_session_id,
+            public_ref=public_ref,
+            router_config=cfg if isinstance(cfg, dict) else {},
+        )
+        return _json({
+            "success": True,
+            "run_id": result.run_id,
+            "level": result.level,
+            "roles": result.roles,
+            "response_text": result.response_text,
+            "reason": result.reason,
+        })
+    except Exception as exc:
+        return _err(str(exc))
+
+
 def runtime_record_approval(
     run_id: str,
     target: str,
@@ -201,6 +253,8 @@ RUNTIME_CREATE_JOB_SCHEMA = {
             "title": {"type": "string"},
             "body": {"type": "string"},
             "depends_on": {"type": "array", "items": {"type": "string"}},
+            "workspace_kind": {"type": "string", "enum": ["scratch", "repo", "worktree", "dir"], "default": "scratch"},
+            "workspace_path": {"type": "string", "description": "Absolute path to bind as the worker cwd for dir/repo/worktree jobs."},
         },
         "required": ["run_id", "role", "title"],
     },
@@ -260,6 +314,27 @@ RUNTIME_CHECK_COMMAND_SCHEMA = {
     },
 }
 
+RUNTIME_ROUTE_TASK_SCHEMA = {
+    "name": "runtime_route_task",
+    "description": (
+        "Smart-router helper for the main agent: after classifying an owner request as L2 or L3, "
+        "create a durable Agent Runtime run and bounded worker jobs so subagents execute it and the dashboard shows activity. "
+        "Do not call for L0/L1 conversational tasks or L4 production mutations."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "level": {"type": "string", "enum": ["L2", "L3"], "description": "Main agent's routing decision."},
+            "title": {"type": "string", "description": "Compact task title."},
+            "objective": {"type": "string", "description": "Owner request / task objective for workers."},
+            "owner_source": {"type": "string", "description": "Chat/session source, e.g. telegram:<chat_id>:<thread_id>."},
+            "orchestrator_session_id": {"type": "string", "description": "Gateway/Hermes session id for the main agent."},
+            "public_ref": {"type": "string", "description": "Optional public ref such as HP-123 or auto-router."},
+        },
+        "required": ["level", "title", "objective"],
+    },
+}
+
 RUNTIME_RECORD_APPROVAL_SCHEMA = {
     "name": "runtime_record_approval",
     "description": "Record an exact-scope approval packet for one or more commands. Used before Ops Worker mutations.",
@@ -307,6 +382,8 @@ registry.register(
         title=args.get("title", ""),
         body=args.get("body", ""),
         depends_on=args.get("depends_on") or [],
+        workspace_kind=args.get("workspace_kind", "scratch"),
+        workspace_path=args.get("workspace_path", ""),
     ),
     check_fn=check_agent_runtime_requirements,
     emoji="🧠",
@@ -356,4 +433,19 @@ registry.register(
     handler=lambda args, **kw: runtime_check_command(command=args.get("command", "")),
     check_fn=check_agent_runtime_requirements,
     emoji="🛡️",
+)
+registry.register(
+    name="runtime_route_task",
+    toolset="agent_runtime",
+    schema=RUNTIME_ROUTE_TASK_SCHEMA,
+    handler=lambda args, **kw: runtime_route_task(
+        level=args.get("level", ""),
+        title=args.get("title", ""),
+        objective=args.get("objective", ""),
+        owner_source=args.get("owner_source", ""),
+        orchestrator_session_id=args.get("orchestrator_session_id", ""),
+        public_ref=args.get("public_ref", "auto-router"),
+    ),
+    check_fn=check_agent_runtime_requirements,
+    emoji="🧭",
 )

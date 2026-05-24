@@ -16,6 +16,7 @@ from typing import Any, Callable
 
 from . import db, spawner, worker_broker, worker_isolation
 from .models import JobClaim
+from .roles import get_role
 from .worker_isolation import assess_worker_isolation
 
 
@@ -104,6 +105,19 @@ def _terminate_process_safely(process: Any) -> None:
             pass
 
 
+def _job_workspace_bind_path(job: Any) -> str | None:
+    kind = str(getattr(job, "workspace_kind", "") or "").strip().lower()
+    path = str(getattr(job, "workspace_path", "") or "").strip()
+    if kind in {"dir", "repo", "worktree"} and path:
+        return path
+    return None
+
+
+def _job_workspace_writable(job: Any) -> bool:
+    role = get_role(str(getattr(job, "role", "") or ""))
+    return bool(role.can_mutate and not role.mutation_requires_approval_packet)
+
+
 def _spawn_claimed_worker(
     conn: sqlite3.Connection,
     claim: JobClaim,
@@ -146,6 +160,8 @@ def _spawn_claimed_worker(
             cwd=invocation.cwd,
             sandbox=bundle.sandbox,
             context_path=bundle.context_path,
+            workspace_bind_path=_job_workspace_bind_path(job),
+            workspace_writable=_job_workspace_writable(job),
             allow_network=allow_network,
             executable_resolver=executable_resolver,
         )

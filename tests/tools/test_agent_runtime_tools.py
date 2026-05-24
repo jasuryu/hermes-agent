@@ -24,10 +24,11 @@ def test_agent_runtime_toolset_resolves_runtime_tools(monkeypatch):
 
     invalidate_check_fn_cache()
     names = set(resolve_toolset("agent_runtime"))
-    assert {"runtime_create_run", "runtime_get_status", "runtime_record_decision"} <= names
+    assert {"runtime_create_run", "runtime_get_status", "runtime_record_decision", "runtime_route_task"} <= names
     schema = registry.get_definitions(names, quiet=True)
     schema_names = {item["function"]["name"] for item in schema}
     assert "runtime_create_run" in schema_names
+    assert "runtime_route_task" in schema_names
     assert "runtime_record_approval" not in schema_names
 
 
@@ -63,6 +64,142 @@ def test_runtime_create_run_and_status_tool_roundtrip():
     assert created["title"] == "Final runtime"
     assert status["run"]["public_ref"] == "HP-88"
     assert status["jobs"] == []
+
+
+def test_runtime_create_job_accepts_explicit_workspace_path(tmp_path):
+    from tools import agent_runtime_tools as rt
+
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    created = json.loads(rt.runtime_create_run(title="Workspace run"))
+    job = json.loads(
+        rt.runtime_create_job(
+            run_id=created["id"],
+            role="code_worker",
+            title="Workspace job",
+            workspace_kind="dir",
+            workspace_path=str(workspace),
+        )
+    )
+
+    assert job["success"] is True
+    assert job["workspace_kind"] == "dir"
+    assert job["workspace_path"] == str(workspace)
+
+
+def test_runtime_route_task_assigns_configured_workspaces(tmp_path):
+    import yaml
+    from tools import agent_runtime_tools as rt
+
+    hermes_repo = tmp_path / "hermes-agent"
+    obsidian = tmp_path / "obsidian"
+    hermes_repo.mkdir()
+    obsidian.mkdir()
+    (Path.home() / ".hermes" / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "subagent_router": {
+                    "workspace_rules": [
+                        {"match": ["router", "Hermes"], "path": str(hermes_repo)},
+                    ],
+                    "scribe_workspace": str(obsidian),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    routed = json.loads(
+        rt.runtime_route_task(
+            level="L3",
+            title="Smart router rollout",
+            objective="Настрой Hermes router для L2/L3 задач",
+            owner_source="telegram:-1003941291843:234",
+            orchestrator_session_id="sess-workspace-router",
+        )
+    )
+    status = json.loads(rt.runtime_get_status(run_id=routed["run_id"]))
+    by_role = {job["role"]: job for job in status["jobs"]}
+
+    assert by_role["code_worker"]["workspace_kind"] == "dir"
+    assert by_role["code_worker"]["workspace_path"] == str(hermes_repo)
+    assert by_role["sentinel"]["workspace_path"] == str(hermes_repo)
+    assert by_role["scribe"]["workspace_path"] == str(obsidian)
+
+
+def test_runtime_route_task_lets_main_agent_create_l3_worker_graph():
+    from tools import agent_runtime_tools as rt
+
+    routed = json.loads(
+        rt.runtime_route_task(
+            level="L3",
+            title="Smart router rollout",
+            objective="Настрой умный router: main agent decides L2/L3 and spawns subagents",
+            owner_source="telegram:-1003941291843:234",
+            orchestrator_session_id="sess-smart-router",
+        )
+    )
+
+    assert routed["success"] is True
+    assert routed["level"] == "L3"
+    assert routed["roles"] == ["explorer", "code_worker", "sentinel", "scribe"]
+    assert routed["response_text"]
+    status = json.loads(rt.runtime_get_status(run_id=routed["run_id"]))
+    assert status["run"]["orchestrator_session_id"] == "sess-smart-router"
+    assert [job["role"] for job in status["jobs"]] == ["explorer", "code_worker", "sentinel", "scribe"]
+    assert "orchestrator" not in {job["role"] for job in status["jobs"]}
+
+
+def test_runtime_route_task_rejects_l4_auto_route():
+    from tools import agent_runtime_tools as rt
+
+    routed = json.loads(
+        rt.runtime_route_task(
+            level="L4",
+            title="Prod mutation",
+            objective="kubectl apply production",
+            owner_source="telegram:-1003941291843:234",
+            orchestrator_session_id="sess-prod",
+        )
+    )
+
+    assert routed["success"] is False
+    assert "only supports L2/L3" in routed["error"]
+
+
+def test_runtime_route_task_respects_configured_source_allowlist():
+    import yaml
+    from tools import agent_runtime_tools as rt
+    from agent_runtime import db
+
+    (Path.home() / ".hermes" / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "subagent_router": {
+                    "allowed_sources": [
+                        {"platform": "telegram", "chat_id": "allowed-chat", "thread_id": "234"}
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    routed = json.loads(
+        rt.runtime_route_task(
+            level="L2",
+            title="Research",
+            objective="Проверь варианты покупки золотых ETF",
+            owner_source="telegram:other-chat:234",
+            orchestrator_session_id="sess-other",
+        )
+    )
+
+    assert routed["success"] is False
+    assert "not allowed" in routed["error"]
+    db.init_db()
+    with db.connect() as conn:
+        assert db.doctor_status(conn)["runs"] == 0
 
 
 def test_runtime_record_decision_tool_persists_event():
